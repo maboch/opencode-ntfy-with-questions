@@ -55,9 +55,10 @@ describe("publish request construction", () => {
       topic: "my_topic",
       title: "Hello",
       message: "World",
-      priority: "default",
+      priority: 3,
       tags: ["tag1"],
     })
+    expect(typeof body.priority).toBe("number")
   })
 
   it("keeps a self-hosted reverse-proxy path prefix and sends the bearer token", async () => {
@@ -73,7 +74,8 @@ describe("publish request construction", () => {
     expect(url).toBe("https://ntfy.example.com/notify/")
     expect((init.headers as Record<string, string>)["authorization"]).toBe("Bearer tk_secret")
     const body = JSON.parse(String(init.body))
-    expect(body.priority).toBe("high")
+    expect(body.priority).toBe(4)
+    expect(typeof body.priority).toBe("number")
   })
 
   it("lets a per-message priority override the configured one", async () => {
@@ -82,7 +84,38 @@ describe("publish request construction", () => {
     await client.publish({ title: "T", message: "M", tags: [], priority: "min" })
     const { init } = requestOf(fetchMock)
     const body = JSON.parse(String(init.body))
-    expect(body.priority).toBe("min")
+    expect(body.priority).toBe(1)
+    expect(typeof body.priority).toBe("number")
+  })
+
+  it.each([
+    ["min", 1],
+    ["low", 2],
+    ["default", 3],
+    ["high", 4],
+    ["max", 5],
+  ] as const)("maps configured priority %s to the ntfy numeric level %i", async (named, level) => {
+    const fetchMock = okFetch()
+    const client = createNtfyClient(settings({ priority: named }), { fetch: fetchMock as unknown as typeof fetch })
+    await client.publish({ title: "T", message: "M", tags: [] })
+    const { init } = requestOf(fetchMock)
+    const body = JSON.parse(String(init.body))
+    expect(body.priority).toBe(level)
+  })
+
+  it.each([
+    ["min", 1],
+    ["low", 2],
+    ["default", 3],
+    ["high", 4],
+    ["max", 5],
+  ] as const)("maps per-message priority %s to the ntfy numeric level %i", async (named, level) => {
+    const fetchMock = okFetch()
+    const client = createNtfyClient(settings({ priority: "max" }), { fetch: fetchMock as unknown as typeof fetch })
+    await client.publish({ title: "T", message: "M", tags: [], priority: named })
+    const { init } = requestOf(fetchMock)
+    const body = JSON.parse(String(init.body))
+    expect(body.priority).toBe(level)
   })
 })
 

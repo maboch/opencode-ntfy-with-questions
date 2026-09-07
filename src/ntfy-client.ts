@@ -32,6 +32,18 @@ export interface NtfyClient {
   publish(message: NtfyMessage): Promise<void>
 }
 
+/**
+ * ntfy's JSON API requires the numeric priority (1..5); the named priorities
+ * are a config convenience and must be mapped immediately before serialization.
+ */
+export const NTFY_PRIORITY_LEVEL: Record<NtfyPriority, number> = {
+  min: 1,
+  low: 2,
+  default: 3,
+  high: 4,
+  max: 5,
+}
+
 /** Base class for publish failures; messages never contain tokens or payloads. */
 export class NtfyPublishError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -60,11 +72,14 @@ export function createNtfyClient(settings: NtfySettings, deps: NtfyClientDeps = 
   const publish = async (message: NtfyMessage): Promise<void> => {
     // Bound here, at the send boundary, so every caller is safe by default.
     const title = truncateUtf8(sanitizeTitle(message.title), MAX_TITLE_BYTES)
+    // A per-message priority overrides the configured one; both are mapped
+    // from the public name to ntfy's numeric level for the wire payload.
+    const priority = NTFY_PRIORITY_LEVEL[message.priority ?? settings.priority]
     const body = JSON.stringify({
       topic: settings.topic,
       title,
       message: truncateUtf8(message.message, MAX_MESSAGE_BYTES),
-      priority: message.priority ?? settings.priority,
+      priority,
       tags: message.tags,
     })
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-ntfy-with-questions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode 1.x plugin that publishes idle, error, permission and question notifications to ntfy (ntfy.sh or self-hosted).",
   "type": "module",
   "license": "MIT",
