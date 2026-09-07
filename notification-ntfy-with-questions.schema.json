@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/maboch/opencode-ntfy-with-questions/main/notification-ntfy-with-questions.schema.json",
+  "title": "opencode-ntfy-with-questions configuration",
+  "description": "Configuration for the opencode-ntfy-with-questions OpenCode plugin. Unknown properties are rejected. String values may reference environment variables ({env:NAME}) or files ({file:path}) that are expanded at load time; a reference must occupy the entire JSON string value.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor hint pointing at this JSON Schema file."
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Set to false to disable all notifications while keeping the plugin loaded."
+    },
+    "events": {
+      "type": "object",
+      "description": "Per-event notification toggles. Every event defaults to enabled.",
+      "properties": {
+        "session.idle": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when a session finishes its run and becomes idle."
+        },
+        "session.error": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when a session reports an error."
+        },
+        "permission.asked": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when opencode asks for a permission decision."
+        },
+        "question.asked": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when the agent invokes the built-in question tool."
+        }
+      },
+      "additionalProperties": false
+    },
+    "suppressSubagents": {
+      "type": "object",
+      "description": "Suppress idle/error notifications for known subagent (child) sessions. Both flags default to true.",
+      "properties": {
+        "session.idle": {
+          "type": "boolean",
+          "default": true,
+          "description": "Do not send session.idle notifications for child sessions."
+        },
+        "session.error": {
+          "type": "boolean",
+          "default": true,
+          "description": "Do not send session.error notifications for child sessions."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ntfy": {
+      "type": "object",
+      "description": "ntfy server and topic settings. Required.",
+      "properties": {
+        "server": {
+          "type": "string",
+          "minLength": 1,
+          "default": "https://ntfy.sh",
+          "description": "ntfy base URL. Must be http(s) with exactly ://, a DNS/IPv4 host, bracketed IPv6 or localhost, an optional canonical decimal port (0 or 1-65535, no leading zeroes) and an optional path prefix with percent-encoded characters allowed. Credentials, whitespace, query strings and fragments are rejected. A trailing slash is added when missing. Alternatively the entire string may be one {env:...}/{file:...} reference expanded at load time.",
+          "anyOf": [
+            {
+              "format": "uri",
+              "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://(?:\\[[0-9A-Fa-f:.]+\\]|(?:(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|(?=[A-Za-z0-9._-]*[A-Za-z_-])[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?(?:\\.[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?)*)(?::(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:[A-Za-z0-9\\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})*)*$"
+            },
+            { "pattern": "^\\{(?:env|file):[^{}]*[^\\s{}][^{}]*\\}$" }
+          ]
+        },
+        "topic": {
+          "type": "string",
+          "anyOf": [
+            { "pattern": "^[-_A-Za-z0-9]{1,64}$" },
+            { "pattern": "^\\{(?:env|file):[^{}]*[^\\s{}][^{}]*\\}$" }
+          ],
+          "description": "ntfy topic name: 1-64 characters from A-Z a-z 0-9 - _, or one full-value {env:...}/{file:...} reference expanded at load time."
+        },
+        "token": {
+          "type": "string",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "\\{(?:env|file):" }
+            },
+            { "pattern": "^\\{(?:env|file):[^{}]*[^\\s{}][^{}]*\\}$" }
+          ],
+          "description": "Optional ntfy access token sent as an Authorization: Bearer header. Never logged. Either a plain literal without reference markers or one full-value {env:...}/{file:...} reference."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["min", "low", "default", "high", "max"],
+          "default": "default",
+          "description": "Fixed notification priority for all events."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000,
+          "default": 5000,
+          "description": "Timeout in milliseconds for each ntfy HTTP request."
+        }
+      },
+      "additionalProperties": false,
+      "required": ["topic"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["ntfy"]
+}

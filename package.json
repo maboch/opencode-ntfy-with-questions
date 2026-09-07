@@ -1,0 +1,60 @@
+{
+  "name": "opencode-ntfy-with-questions",
+  "version": "0.1.0",
+  "description": "OpenCode 1.x plugin that publishes idle, error, permission and question notifications to ntfy (ntfy.sh or self-hosted).",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "ntfy",
+    "notification",
+    "push"
+  ],
+  "author": "Maciej Bochynski",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maboch/opencode-ntfy-with-questions"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./notification-ntfy-with-questions.schema.json": {
+      "import": "./notification-ntfy-with-questions.schema.json",
+      "require": "./notification-ntfy-with-questions.schema.json",
+      "default": "./notification-ntfy-with-questions.schema.json"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "notification-ntfy-with-questions.schema.json"
+  ],
+  "engines": {
+    "opencode": ">=1.18.25",
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist coverage node_modules"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.25",
+    "@types/node": "^24.0.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "eslint": "^9.17.0",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^3.0.0"
+  }
+}
