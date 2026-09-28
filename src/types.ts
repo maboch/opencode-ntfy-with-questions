@@ -42,6 +42,12 @@ export interface PluginConfig {
   enabled: boolean
   events: Record<NotificationKind, boolean>
   suppressSubagents: SuppressSubagentSettings
+  /**
+   * Grace period in milliseconds before a `permission.asked` notification is
+   * published. A matching `permission.replied` within that window cancels the
+   * pending notification. `0` publishes immediately without a grace period.
+   */
+  permissionNotificationDelayMs: number
   ntfy: NtfySettings
 }
 
@@ -75,6 +81,14 @@ export const CONFIG_FILE_NAME = "notification-ntfy-with-questions.json"
 export const DEFAULT_NTFY_SERVER = "https://ntfy.sh"
 export const DEFAULT_NTFY_PRIORITY: NtfyPriority = "default"
 export const DEFAULT_TIMEOUT_MS = 5000
+
+/**
+ * Default grace period before a permission request is notified. Tuned so a fast
+ * manual answer (and opencode's own auto-approval, which is invisible to
+ * plugins) usually lands before the notification is sent.
+ */
+export const DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS = 15000
+export const MAX_PERMISSION_NOTIFICATION_DELAY_MS = 300000
 
 export const TOPIC_PATTERN = /^[-_A-Za-z0-9]{1,64}$/
 

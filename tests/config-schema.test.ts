@@ -11,6 +11,7 @@ import { ConfigError, loadConfigFile, normalizeConfig, normalizeServerUrl, parse
 import {
   DEFAULT_NTFY_PRIORITY,
   DEFAULT_NTFY_SERVER,
+  DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS,
   DEFAULT_TIMEOUT_MS,
   notificationKinds,
   type NtfyPriority,
@@ -56,6 +57,7 @@ describe("schema parity", () => {
       enabled: { default: boolean }
       events: { properties: Record<string, { default: boolean }> }
       suppressSubagents: { properties: Record<string, { default: boolean }> }
+      permissionNotificationDelayMs: { default: number }
       ntfy: {
         properties: {
           server: { default: string }
@@ -75,9 +77,12 @@ describe("schema parity", () => {
   const validSamples = [
     { ntfy: { topic: "topic-a" } },
     { enabled: false, ntfy: { topic: "topic-b" } },
+    { permissionNotificationDelayMs: 0, ntfy: { topic: "topic-delay-zero" } },
+    { permissionNotificationDelayMs: 300000, ntfy: { topic: "topic-delay-max" } },
     {
       events: { "session.idle": true, "session.error": false },
       suppressSubagents: { "session.idle": false },
+      permissionNotificationDelayMs: 15000,
       ntfy: {
         server: "https://self.ntfy.example/x",
         topic: "topic-c",
@@ -108,6 +113,11 @@ describe("schema parity", () => {
     { ntfy: { topic: "t", timeoutMs: 0 } },
     { ntfy: { topic: "t", timeoutMs: 60001 } },
     { ntfy: { topic: "t", timeoutMs: 1.5 } },
+    { permissionNotificationDelayMs: 1.5, ntfy: { topic: "t" } },
+    { permissionNotificationDelayMs: -1, ntfy: { topic: "t" } },
+    { permissionNotificationDelayMs: 300001, ntfy: { topic: "t" } },
+    { permissionNotificationDelayMs: "15000", ntfy: { topic: "t" } },
+    { permissionNotificationDelayMs: true, ntfy: { topic: "t" } },
     { ntfy: { topic: "t", priority: "nope" } },
     { ntfy: { topic: "t", token: "" } },
     { ntfy: { topic: "t", extra: 1 } },
@@ -260,8 +270,10 @@ describe("schema parity", () => {
     for (const key of ["session.idle", "session.error"] as const) {
       expect(config.suppressSubagents[key]).toBe(schema.properties.suppressSubagents.properties[key]!.default)
     }
+    expect(config.permissionNotificationDelayMs).toBe(schema.properties.permissionNotificationDelayMs.default)
     expect(DEFAULT_NTFY_SERVER).toBe(schema.properties.ntfy.properties.server.default)
     expect(DEFAULT_NTFY_PRIORITY).toBe(schema.properties.ntfy.properties.priority.default)
     expect(DEFAULT_TIMEOUT_MS).toBe(schema.properties.ntfy.properties.timeoutMs.default)
+    expect(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS).toBe(schema.properties.permissionNotificationDelayMs.default)
   })
 })
