@@ -75,7 +75,15 @@ export function resolveSessionLookupTimeout(value: number | undefined): number {
 export interface PluginHandlers {
   event(input: { event: unknown }): Promise<void>
   "tool.execute.before"(input: { tool: string; sessionID: string; callID: string }, output: { args: unknown }): Promise<void>
+  /** Cancels every pending delayed permission notification. */
+  dispose(): Promise<void>
 }
+
+/**
+ * Upper bound on the recently-replied request ID memory. It only needs to
+ * cover the narrow race where a reply is observed before its ask event.
+ */
+const MAX_RECENTLY_REPLIED_REQUEST_IDS = 512
 
 /**
  * Builds the two hooks used by the plugin from explicit dependencies so tests
@@ -97,6 +105,83 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     } catch (error) {
       log(`notification "${draft.kind}" was not sent: ${describeNtfyError(error)}`)
     }
+  }
+
+  const permissionNotificationDelayMs = config.permissionNotificationDelayMs
+  // Once disposed, no permission hook may schedule or publish, and every
+  // pending timer has already been cleared.
+  let disposed = false
+  // Pending delayed permission notifications, keyed by request ID. Requests
+  // without a usable ID are tracked separately only so dispose can clear them.
+  const permissionRequestTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const anonymousPermissionTimers = new Set<ReturnType<typeof setTimeout>>()
+  // Bounded FIFO of request IDs answered recently, so a permission.replied that
+  // is observed before its permission.asked still suppresses the notification.
+  const recentlyRepliedRequestIDs = new Set<string>()
+
+  const rememberRepliedRequestID = (requestID: string): void => {
+    // Re-insertion moves the ID to the most-recent position of the Set.
+    if (recentlyRepliedRequestIDs.has(requestID)) recentlyRepliedRequestIDs.delete(requestID)
+    recentlyRepliedRequestIDs.add(requestID)
+    if (recentlyRepliedRequestIDs.size > MAX_RECENTLY_REPLIED_REQUEST_IDS) {
+      const oldest = recentlyRepliedRequestIDs.values().next().value
+      if (oldest !== undefined) recentlyRepliedRequestIDs.delete(oldest)
+    }
+  }
+
+  /**
+   * Schedules one delayed permission notification. A duplicate ask is ignored
+   * while a notification for the same request ID is still pending, and while
+   * that ID is still in the bounded recently-replied set; outside those windows
+   * the same request can be scheduled again.
+   */
+  const schedulePermissionNotification = (
+    requestID: string | undefined,
+    permission: string,
+    patterns: string[],
+    sessionID: string | undefined,
+  ): void => {
+    if (disposed) return
+    if (requestID !== undefined && (permissionRequestTimers.has(requestID) || recentlyRepliedRequestIDs.has(requestID))) {
+      return
+    }
+    const timer = setTimeout(() => {
+      if (disposed) return
+      if (requestID !== undefined) permissionRequestTimers.delete(requestID)
+      else anonymousPermissionTimers.delete(timer)
+      // The timer boundary must never surface an unhandled rejection or throw,
+      // even if publish rejects and the injected logger throws while reporting
+      // it. Formatting failures are swallowed for the same reason.
+      try {
+        void send(formatPermissionDraft(permission, patterns, sessionID, projectName)).catch(() => {})
+      } catch {
+        // A formatting failure must not become an uncaught timer exception.
+      }
+    }, permissionNotificationDelayMs)
+    // Never keep the process alive just for a pending notification.
+    timer.unref?.()
+    if (requestID !== undefined) permissionRequestTimers.set(requestID, timer)
+    else anonymousPermissionTimers.add(timer)
+  }
+
+  /** Cancels a pending notification for an answered request and remembers the reply. */
+  const handlePermissionReplied = (requestID: string): void => {
+    const timer = permissionRequestTimers.get(requestID)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      permissionRequestTimers.delete(requestID)
+    }
+    rememberRepliedRequestID(requestID)
+  }
+
+  const dispose = async (): Promise<void> => {
+    // Mark first so a hook invoked during or after disposal cannot reschedule.
+    disposed = true
+    for (const timer of permissionRequestTimers.values()) clearTimeout(timer)
+    permissionRequestTimers.clear()
+    for (const timer of anonymousPermissionTimers) clearTimeout(timer)
+    anonymousPermissionTimers.clear()
+    recentlyRepliedRequestIDs.clear()
   }
 
   /**
@@ -208,9 +293,23 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
           return
         }
         case "permission.asked": {
-          // Permissions always notify, including from subagents.
+          // Permission notifications cover root and child sessions alike, but a
+          // disposed handler must not schedule or publish anything.
+          if (disposed) return
           if (!config.events["permission.asked"]) return
+          if (permissionNotificationDelayMs > 0) {
+            // Positive grace period: schedule and return without waiting for ntfy.
+            schedulePermissionNotification(parsed.requestID, parsed.permission, parsed.patterns, parsed.sessionID)
+            return
+          }
+          // Delay 0 keeps the original behavior: publish before returning.
           await send(formatPermissionDraft(parsed.permission, parsed.patterns, parsed.sessionID, projectName))
+          return
+        }
+        case "permission.replied": {
+          // With no grace period there is never a pending notification to cancel.
+          if (permissionNotificationDelayMs <= 0) return
+          handlePermissionReplied(parsed.requestID)
           return
         }
       }
@@ -234,7 +333,7 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     }
   }
 
-  return { event: onEvent, "tool.execute.before": onToolExecuteBefore }
+  return { event: onEvent, "tool.execute.before": onToolExecuteBefore, dispose }
 }
 
 /** Human-readable project label used in notification titles. */
@@ -281,6 +380,7 @@ export function createPlugin(deps: CreatePluginDeps = {}): Plugin {
     const hooks: Hooks = {
       event: handlers.event as unknown as Hooks["event"],
       "tool.execute.before": handlers["tool.execute.before"] as unknown as NonNullable<Hooks["tool.execute.before"]>,
+      dispose: handlers.dispose,
     }
     return hooks
   }

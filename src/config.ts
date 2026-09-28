@@ -14,8 +14,10 @@ import {
   CONFIG_FILE_NAME,
   DEFAULT_NTFY_PRIORITY,
   DEFAULT_NTFY_SERVER,
+  DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS,
   DEFAULT_TIMEOUT_MS,
   MAX_CONFIG_FILE_BYTES,
+  MAX_PERMISSION_NOTIFICATION_DELAY_MS,
   MAX_REFERENCED_FILE_BYTES,
   MAX_TIMEOUT_MS,
   MIN_TIMEOUT_MS,
@@ -42,7 +44,14 @@ export class ConfigError extends Error {
   }
 }
 
-const TOP_LEVEL_KEYS = new Set(["$schema", "enabled", "events", "suppressSubagents", "ntfy"])
+const TOP_LEVEL_KEYS = new Set([
+  "$schema",
+  "enabled",
+  "events",
+  "suppressSubagents",
+  "permissionNotificationDelayMs",
+  "ntfy",
+])
 const NTFY_KEYS = new Set(["server", "topic", "token", "priority", "timeoutMs"])
 
 /**
@@ -328,6 +337,20 @@ export function normalizeConfig(raw: unknown): PluginConfig {
     }
   }
 
+  let permissionNotificationDelayMs = DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS
+  const rawDelay = raw["permissionNotificationDelayMs"]
+  if (rawDelay !== undefined) {
+    if (typeof rawDelay !== "number" || !Number.isInteger(rawDelay)) {
+      throw invalid('"permissionNotificationDelayMs" must be an integer')
+    }
+    if (rawDelay < 0 || rawDelay > MAX_PERMISSION_NOTIFICATION_DELAY_MS) {
+      throw invalid(
+        `"permissionNotificationDelayMs" must be between 0 and ${MAX_PERMISSION_NOTIFICATION_DELAY_MS}`,
+      )
+    }
+    permissionNotificationDelayMs = rawDelay
+  }
+
   const rawNtfy = raw["ntfy"]
   if (rawNtfy === undefined) throw invalid('required property "ntfy" is missing')
   if (!isPlainObject(rawNtfy)) throw invalid('"ntfy" must be an object')
@@ -374,7 +397,13 @@ export function normalizeConfig(raw: unknown): PluginConfig {
     timeoutMs = timeoutValue
   }
 
-  return { enabled, events, suppressSubagents, ntfy: { server, topic, token, priority, timeoutMs } }
+  return {
+    enabled,
+    events,
+    suppressSubagents,
+    permissionNotificationDelayMs,
+    ntfy: { server, topic, token, priority, timeoutMs },
+  }
 }
 
 function allTrueEvents(): Record<NotificationKind, boolean> {

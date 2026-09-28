@@ -15,7 +15,14 @@ export type ParsedEvent =
   | { kind: "lifecycle"; action: LifecycleAction; sessionID: string; parentID: string | null }
   | { kind: "session.idle"; sessionID: string }
   | { kind: "session.error"; sessionID: string | undefined; errorMessage: string }
-  | { kind: "permission.asked"; sessionID: string | undefined; permission: string; patterns: string[] }
+  | {
+      kind: "permission.asked"
+      sessionID: string | undefined
+      requestID?: string
+      permission: string
+      patterns: string[]
+    }
+  | { kind: "permission.replied"; requestID: string }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
@@ -66,11 +73,20 @@ export function parseRuntimeEvent(envelope: unknown): ParsedEvent | null {
     }
     case "permission.asked": {
       const sessionID = nonEmptyString(props?.sessionID)
+      const requestID = nonEmptyString(props?.id)
       const permission =
         typeof props?.permission === "string" && props.permission !== "" ? (props.permission as string) : "unknown"
       const rawPatterns = props?.patterns
       const patterns = Array.isArray(rawPatterns) ? rawPatterns.filter((p): p is string => typeof p === "string") : []
-      return { kind: "permission.asked", sessionID, permission, patterns }
+      return { kind: "permission.asked", sessionID, requestID, permission, patterns }
+    }
+    case "permission.replied": {
+      // The reply request ID correlates with the matching asked request. Older
+      // opencode versions name the field `permissionID`, so it is the fallback.
+      const requestID = nonEmptyString(props?.requestID) ?? nonEmptyString(props?.permissionID)
+      // A reply without a usable ID cannot cancel any pending notification.
+      if (!requestID) return null
+      return { kind: "permission.replied", requestID }
     }
     default:
       return null

@@ -58,6 +58,13 @@
       },
       "additionalProperties": false
     },
+    "permissionNotificationDelayMs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 300000,
+      "default": 15000,
+      "description": "Grace period in milliseconds before a permission request notification is published. If opencode replies (permission.replied) within this window the notification is suppressed. 0 publishes immediately without a grace period."
+    },
     "ntfy": {
       "type": "object",
       "description": "ntfy server and topic settings. Required.",

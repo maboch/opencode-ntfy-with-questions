@@ -17,6 +17,7 @@ function config(overrides: {
   ntfy?: Partial<NtfySettings>
 } = {}): PluginConfig {
   return normalizeConfig({
+    permissionNotificationDelayMs: 0,
     enabled: overrides.enabled ?? true,
     events: overrides.events,
     suppressSubagents: overrides.suppressSubagents,

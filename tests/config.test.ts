@@ -11,7 +11,7 @@ import {
   parseConfigText,
   resolveConfigFilePath,
 } from "../src/config.js"
-import { MAX_REFERENCED_FILE_BYTES, notificationKinds } from "../src/types.js"
+import { MAX_REFERENCED_FILE_BYTES, DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS, notificationKinds } from "../src/types.js"
 
 const tempDirs: string[] = []
 
@@ -78,6 +78,7 @@ describe("loadConfigFile", () => {
     expect(config.enabled).toBe(true)
     for (const kind of notificationKinds) expect(config.events[kind]).toBe(true)
     expect(config.suppressSubagents).toEqual({ "session.idle": true, "session.error": true })
+    expect(config.permissionNotificationDelayMs).toBe(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
     expect(config.ntfy.server).toBe("https://ntfy.sh/")
     expect(config.ntfy.topic).toBe("my-topic")
     expect(config.ntfy.priority).toBe("default")
@@ -104,6 +105,7 @@ describe("validation", () => {
       enabled: true,
       events: { "session.idle": true, "session.error": false, "permission.asked": true, "question.asked": false },
       suppressSubagents: { "session.idle": false, "session.error": true },
+      permissionNotificationDelayMs: 300000,
       ntfy: {
         server: "https://ntfy.example.com/prefix",
         topic: "opencode_alerts-1",
@@ -117,6 +119,14 @@ describe("validation", () => {
     expect(config.events["session.error"]).toBe(false)
     expect(config.suppressSubagents["session.idle"]).toBe(false)
     expect(config.ntfy.priority).toBe("high")
+    expect(config.permissionNotificationDelayMs).toBe(300000)
+  })
+
+  it("accepts permissionNotificationDelayMs 0 (immediate) and the maximum", () => {
+    expect(normalizeConfig({ permissionNotificationDelayMs: 0, ntfy: { topic: "t" } }).permissionNotificationDelayMs).toBe(0)
+    expect(
+      normalizeConfig({ permissionNotificationDelayMs: 300000, ntfy: { topic: "t" } }).permissionNotificationDelayMs,
+    ).toBe(300000)
   })
 
   const invalidCases: Array<[string, unknown, RegExp]> = [
@@ -158,6 +168,31 @@ describe("validation", () => {
     ["timeout too small", { ntfy: { topic: "t", timeoutMs: 0 } }, /timeoutMs.*between 1 and 60000/],
     ["timeout negative", { ntfy: { topic: "t", timeoutMs: -5 } }, /timeoutMs/],
     ["timeout too large", { ntfy: { topic: "t", timeoutMs: 60001 } }, /timeoutMs.*between 1 and 60000/],
+    [
+      "permissionNotificationDelayMs fractional",
+      { permissionNotificationDelayMs: 1.5, ntfy: { topic: "t" } },
+      /permissionNotificationDelayMs/,
+    ],
+    [
+      "permissionNotificationDelayMs negative",
+      { permissionNotificationDelayMs: -1, ntfy: { topic: "t" } },
+      /permissionNotificationDelayMs/,
+    ],
+    [
+      "permissionNotificationDelayMs over maximum",
+      { permissionNotificationDelayMs: 300001, ntfy: { topic: "t" } },
+      /permissionNotificationDelayMs.*between 0 and 300000/,
+    ],
+    [
+      "permissionNotificationDelayMs not a number",
+      { permissionNotificationDelayMs: "15000", ntfy: { topic: "t" } },
+      /permissionNotificationDelayMs/,
+    ],
+    [
+      "permissionNotificationDelayMs boolean",
+      { permissionNotificationDelayMs: true, ntfy: { topic: "t" } },
+      /permissionNotificationDelayMs/,
+    ],
     ["enabled not boolean", { enabled: "yes", ntfy: { topic: "t" } }, /"enabled"/],
   ]
 

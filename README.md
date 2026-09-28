@@ -77,6 +77,7 @@ The JSON Schema for editor validation is packaged with the plugin at
     "session.idle": true,
     "session.error": true
   },
+  "permissionNotificationDelayMs": 15000,
   "ntfy": {
     "server": "https://ntfy.sh",
     "topic": "my-opencode-alerts",
@@ -127,6 +128,7 @@ strings that merely contain unrelated braces are left untouched.
 | `enabled` | `true` | Set to `false` to keep the plugin loaded but send nothing. |
 | `events` | all `true` | Toggles per notification kind: `session.idle`, `session.error`, `permission.asked`, `question.asked`. |
 | `suppressSubagents` | both `true` | Suppress `session.idle` / `session.error` notifications for known subagent sessions. |
+| `permissionNotificationDelayMs` | `15000` | Grace period in ms (integer `0`-`300000`) before a `permission.asked` notification is published. A matching `permission.replied` within the window suppresses it. `0` publishes immediately. |
 | `ntfy.server` | `https://ntfy.sh` | Base URL, http(s), DNS/IPv4/localhost/bracketed-IPv6 host, optional canonical port, optional reverse-proxy path prefix. Credentials, whitespace, query strings and fragments are rejected. May instead be one full-value `{env:...}`/`{file:...}` reference. |
 | `ntfy.topic` | (required) | 1-64 characters from `A-Z a-z 0-9 - _`, or one full-value reference. |
 | `ntfy.token` | none | Sent as `Authorization: Bearer ...`. Never logged. A plain literal without reference markers, or one full-value reference. |
@@ -157,8 +159,9 @@ variable names and paths.
   deadline), the plugin fails open: it sends the notification and logs a
   sanitized warning that names only the session.
 - An error event without a `sessionID` always notifies.
-- `permission.asked` and question notifications are always sent, including
-  from subagents.
+- `permission.asked` notifications are sent for root and child sessions alike,
+  but only after a grace period (see below). Question notifications are always
+  sent, including from subagents.
 - Question notifications come from the `tool.execute.before` hook filtered by
   the exact tool name `question`. Runtime `question.asked` events are ignored,
   so one question produces exactly one notification. Publishing the
@@ -173,6 +176,35 @@ Notification titles contain the project basename (the directory the opencode
 instance runs in). Tags are fixed: idle `hourglass_done`, error `warning`,
 permission `lock`, question `question`.
 
+### Permission notification grace period
+
+A `permission.asked` notification is delayed by `permissionNotificationDelayMs`
+(15000 ms by default). If a matching `permission.replied` event arrives within
+that window, the pending notification is cancelled and nothing is published.
+OpenCode may auto-approve a request it did ask about, and the user may answer
+quickly in the terminal; a `permission.replied` then arrives before the grace
+period elapses and the push notification would be noise. This is distinct from
+permissions already allowed by a standing rule: those never emit a
+`permission.asked` event at all, so no notification is scheduled for them.
+
+- Correlation uses the permission request ID, never the session ID, so several
+  concurrent requests in the same session are tracked independently.
+- A duplicate `permission.asked` for a request that is already pending is
+  ignored: the notification is neither duplicated nor rescheduled.
+- A reply that arrives before its ask event is remembered (up to 512 request
+  IDs) and still suppresses the notification once the ask is seen.
+- A request without a usable ID is still notified after the grace period, but
+  it cannot be correlated with a reply. Such pending timers are tracked and
+  cancelled when the plugin is disposed.
+- A reply after the grace period cannot retract a notification that was already
+  sent; it is too late by design.
+- This is a heuristic. OpenCode does not expose its auto-approve mode to
+  plugins, so the plugin cannot know in advance whether a request will be
+  answered automatically and relies purely on the reply event arriving in time.
+- Set `permissionNotificationDelayMs` to `0` to restore immediate publication
+  (the pre-grace-period behavior). The event hook then awaits the ntfy publish,
+  exactly like the idle/error/question notifications.
+
 ## What data is transmitted
 
 ntfy requests are JSON POSTs to the configured base URL with the topic in the
@@ -184,8 +216,8 @@ body (never in the URL), `Content-Type: application/json`, optional
 - Error: the project name, the session ID (when present), and the error name
   plus its message (`data.message` when available). Stacks, response bodies,
   headers and provider IDs are never included.
-- Permission: the project name, the session ID (when present), the permission
-  type and the requested patterns.
+- Permission (after the grace period): the project name, the session ID (when
+  present), the permission type and the requested patterns.
 - Question: the project name plus every question with its header, its options
   (labels and descriptions) and whether multiple answers are allowed. If the
   question payload is malformed, a generic "open the conversation" message is
