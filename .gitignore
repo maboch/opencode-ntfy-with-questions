@@ -4,4 +4,3 @@ coverage/
 *.tgz
 *.log
 .DS_Store
-.codegraph
