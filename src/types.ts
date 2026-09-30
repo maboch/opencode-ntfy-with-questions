@@ -52,17 +52,21 @@ export interface PluginConfig {
 }
 
 /**
- * The event envelope opencode delivers to the plugin `event` hook at runtime.
+ * The native opencode v2 event envelope delivered on the public event stream.
  *
- * The compiled `Event` type from @opencode-ai/plugin is a closed union that
- * omits several runtime variants (for example `permission.asked`), so the
- * adapter in event-adapter.ts treats this shape as unknown and narrows it
- * manually instead of trusting the declared union.
+ * The stream is decoded from the SDK as unknown and narrowed manually in
+ * event-adapter.ts: every field stays `unknown` so a malformed frame is
+ * rejected instead of trusted. `data` carries the event-specific payload and
+ * `location` identifies the server location the event originated from (the v2
+ * stream is global across locations, so consumers must filter on it).
  */
 export interface RuntimeEventEnvelope {
   id?: unknown
   type?: unknown
-  properties?: unknown
+  data?: unknown
+  location?: unknown
+  created?: unknown
+  durable?: unknown
 }
 
 /**

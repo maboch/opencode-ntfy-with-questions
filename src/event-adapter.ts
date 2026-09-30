@@ -1,15 +1,16 @@
 /**
  * Runtime event parsing and notification formatting.
  *
- * The plugin `event` hook receives envelopes shaped `{ id, type, properties }`,
- * but the compiled `Event` type from @opencode-ai/plugin is a closed union that
- * omits several runtime variants (for example `permission.asked`). Everything
- * is therefore accepted as `unknown` and narrowed manually here.
+ * The plugin consumes the native opencode v2 event stream, whose envelopes are
+ * shaped `{ id, type, data, location?, created?, durable? }`. The stream is
+ * global across server locations and decoded as `unknown`, so every frame is
+ * narrowed manually here before it reaches the notification handlers.
  */
 
 import { kindTags, type NotificationDraft } from "./types.js"
 
-export type LifecycleAction = "created" | "updated" | "deleted"
+/** Native lifecycle actions the plugin tracks. There is no `updated` in v2. */
+export type LifecycleAction = "created" | "deleted"
 
 export type ParsedEvent =
   | { kind: "lifecycle"; action: LifecycleAction; sessionID: string; parentID: string | null }
@@ -33,58 +34,70 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 /**
- * Parses one runtime event envelope into a narrowed internal event.
+ * Parses one native v2 event envelope into a narrowed internal event.
  *
- * Returns `null` for unknown event types and for `question.asked`: question
- * notifications are produced exclusively from the `tool.execute.before` hook
- * filtered by the exact tool name `question` so a single question is never
- * notified twice.
+ * Returns `null` for unknown event types. The following native routes are
+ * deliberately ignored:
+ * - `question.*` / `question.v2.*` / `form.*`: question notifications come
+ *   exclusively from the `tool.execute.before` hook filtered by the exact tool
+ *   name `question`, so a question is never notified twice.
+ * - the deprecated `session.idle`: `session.status` with `status.type === "idle"`
+ *   is the single source of idle notifications (avoids a duplicate per run).
+ * - the legacy `session.error` (native errors arrive as
+ *   `session.execution.failed`) and transient `session.step.failed` /
+ *   `session.retry.scheduled` frames.
  */
 export function parseRuntimeEvent(envelope: unknown): ParsedEvent | null {
   const record = asRecord(envelope)
   if (!record) return null
   const type = typeof record["type"] === "string" ? (record["type"] as string) : null
   if (!type) return null
-  if (type === "question.asked") return null
+  if (type.startsWith("question.") || type.startsWith("form.")) return null
 
-  const props = asRecord(record["properties"])
+  const data = asRecord(record["data"])
 
   switch (type) {
-    case "session.created":
-    case "session.updated":
-    case "session.deleted": {
-      const info = asRecord(props?.info)
-      const sessionID = nonEmptyString(props?.sessionID) ?? nonEmptyString(info?.id)
+    case "session.created": {
+      // Native `session.created` carries a FLAT payload: the session ID and an
+      // optional `parentID` live directly on `data`, not in a nested `info`.
+      const sessionID = nonEmptyString(data?.sessionID)
       if (!sessionID) return null
-      const rawParent = info?.parentID
-      const parentID = typeof rawParent === "string" && rawParent !== "" ? rawParent : null
-      const action: LifecycleAction =
-        type === "session.created" ? "created" : type === "session.updated" ? "updated" : "deleted"
-      return { kind: "lifecycle", action, sessionID, parentID }
+      const parentID = nonEmptyString(data?.parentID) ?? null
+      return { kind: "lifecycle", action: "created", sessionID, parentID }
     }
-    case "session.idle": {
-      const sessionID = nonEmptyString(props?.sessionID)
+    case "session.deleted": {
+      const sessionID = nonEmptyString(data?.sessionID)
       if (!sessionID) return null
+      return { kind: "lifecycle", action: "deleted", sessionID, parentID: null }
+    }
+    case "session.status": {
+      const sessionID = nonEmptyString(data?.sessionID)
+      if (!sessionID) return null
+      const status = asRecord(data?.status)
+      // Only the terminal `idle` status notifies; `busy` and `retry` are
+      // transient and are ignored.
+      if (nonEmptyString(status?.type) !== "idle") return null
       return { kind: "session.idle", sessionID }
     }
-    case "session.error": {
-      const sessionID = nonEmptyString(props?.sessionID)
-      return { kind: "session.error", sessionID, errorMessage: extractErrorMessage(props?.error) }
+    case "session.execution.failed": {
+      const sessionID = nonEmptyString(data?.sessionID)
+      return { kind: "session.error", sessionID, errorMessage: extractErrorMessage(data?.error) }
     }
     case "permission.asked": {
-      const sessionID = nonEmptyString(props?.sessionID)
-      const requestID = nonEmptyString(props?.id)
-      const permission =
-        typeof props?.permission === "string" && props.permission !== "" ? (props.permission as string) : "unknown"
-      const rawPatterns = props?.patterns
-      const patterns = Array.isArray(rawPatterns) ? rawPatterns.filter((p): p is string => typeof p === "string") : []
+      // Native permission payload: `action` is the permission name, `resources`
+      // the affected patterns and `id` the request identifier.
+      const sessionID = nonEmptyString(data?.sessionID)
+      const requestID = nonEmptyString(data?.id)
+      const permission = nonEmptyString(data?.action) ?? "unknown"
+      const rawResources = data?.resources
+      const patterns = Array.isArray(rawResources)
+        ? rawResources.filter((resource): resource is string => typeof resource === "string")
+        : []
       return { kind: "permission.asked", sessionID, requestID, permission, patterns }
     }
     case "permission.replied": {
-      // The reply request ID correlates with the matching asked request. Older
-      // opencode versions name the field `permissionID`, so it is the fallback.
-      const requestID = nonEmptyString(props?.requestID) ?? nonEmptyString(props?.permissionID)
-      // A reply without a usable ID cannot cancel any pending notification.
+      // Only the native `requestID` correlates; there is no legacy fallback.
+      const requestID = nonEmptyString(data?.requestID)
       if (!requestID) return null
       return { kind: "permission.replied", requestID }
     }
@@ -94,22 +107,25 @@ export function parseRuntimeEvent(envelope: unknown): ParsedEvent | null {
 }
 
 /**
- * Extracts a safe, human readable message from an opencode error object such
- * as `{ name: "ProviderAuthError", data: { message: "..." } }`. Only the error
- * name and the first message-like field are used - never a stack trace, HTTP
- * response body or other potentially large or sensitive fields.
+ * Extracts a safe, human readable message from a native structured error
+ * `{ type, message, status?, response? }` or from the older
+ * `{ name, data: { message } }` shape. Only the error type/name and the first
+ * message-like field are used - never a stack trace, HTTP response body or
+ * other potentially large or sensitive fields.
  */
 export function extractErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim() !== "") return error
   const record = asRecord(error)
   if (!record) return "unknown error"
-  const name = typeof record["name"] === "string" && record["name"] !== "" ? (record["name"] as string) : "error"
+  const type = nonEmptyString(record["type"])
+  const name = nonEmptyString(record["name"])
+  const label = type ?? name ?? "error"
   const data = asRecord(record["data"])
   const message =
-    (data && typeof data["message"] === "string" && data["message"] !== "" && data["message"]) ||
-    (typeof record["message"] === "string" && record["message"] !== "" && record["message"]) ||
+    nonEmptyString(record["message"]) ??
+    (data ? nonEmptyString(data["message"]) : undefined) ??
     "no additional details"
-  return `${name}: ${message}`
+  return `${label}: ${message}`
 }
 
 function draft(kind: NotificationDraft["kind"], title: string, message: string): NotificationDraft {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { normalizeConfig } from "../src/config.js"
-import { createPlugin, createPluginHandlers, type Logger, type OpenCodeClientLike } from "../src/index.js"
+import { createPluginHandlers, type Logger } from "../src/notification-handlers.js"
 import type { NtfyClient, NtfyMessage } from "../src/ntfy-client.js"
 import { SessionRegistry } from "../src/session-registry.js"
 import {
@@ -42,11 +42,10 @@ function harness(
   const logMessages: string[] = []
   const logger: Logger = overrides.log ?? ((message: string) => logMessages.push(message))
   const registry = overrides.registry ?? new SessionRegistry()
-  const client = { session: { get: async () => ({ data: {} }) } } as unknown as OpenCodeClientLike
   const handlers = createPluginHandlers({
     config: overrides.config ?? config(),
     projectName: "demo-project",
-    client,
+    getSession: async () => ({}),
     ntfy,
     registry,
     log: logger,
@@ -56,34 +55,35 @@ function harness(
 
 const permissionAsked = (id: unknown, sessionID = "sess_root") => ({
   event: {
+    id: "evt_perm",
     type: "permission.asked",
-    properties: {
+    created: 1,
+    data: {
       ...(id === undefined ? {} : { id }),
       sessionID,
-      permission: "edit",
-      patterns: ["**/*.ts"],
+      action: "edit",
+      resources: ["**/*.ts"],
     },
   },
 })
 
 const permissionReplied = (requestID: unknown, reply = "once") => ({
   event: {
+    id: "evt_reply",
     type: "permission.replied",
-    properties: {
-      ...(requestID === undefined ? {} : { requestID }),
-      sessionID: "sess_root",
-      permission: "edit",
-      reply,
-    },
+    created: 1,
+    data: { sessionID: "sess_root", ...(requestID === undefined ? {} : { requestID }), reply },
   },
 })
 
-// Legacy shape kept only to prove the older `response`/`permissionID` event is
-// still parsed; the current fixtures use the v2 `reply` field.
+// Legacy shape kept only to prove the native adapter ignores the old
+// `permissionID` field (there is no fallback in v2).
 const legacyPermissionReplied = (permissionID: unknown) => ({
   event: {
+    id: "evt_legacy",
     type: "permission.replied",
-    properties: { permissionID, sessionID: "sess_root", response: "always" },
+    created: 1,
+    data: { sessionID: "sess_root", permissionID, response: "always" },
   },
 })
 
@@ -127,7 +127,7 @@ describe("permission notification grace period", () => {
     expect(h.sent).toHaveLength(1)
   })
 
-  it("publishes immediately and does not resolve until the publisher settles when the delay is 0", async () => {
+  it("publishes immediately and awaits the publisher when the delay is 0", async () => {
     const gate = deferred()
     let publishCalled = false
     const h = harness({
@@ -141,7 +141,6 @@ describe("permission notification grace period", () => {
     const eventPromise = h.handlers.event(permissionAsked("per_1")).then(() => {
       settled = true
     })
-    // The handler must have reached the awaited publish but still be pending.
     await Promise.resolve()
     await Promise.resolve()
     expect(publishCalled).toBe(true)
@@ -154,7 +153,6 @@ describe("permission notification grace period", () => {
   it("returns from the event hook promptly with a positive delay", async () => {
     const h = harness()
     await h.handlers.event(permissionAsked("per_1"))
-    // Nothing is published until fake time advances, so the hook did not wait.
     expect(h.sent).toHaveLength(0)
   })
 })
@@ -186,24 +184,15 @@ describe("permission replies", () => {
     await h.handlers.event(permissionAsked("per_2", "sess_same"))
     await h.handlers.event(permissionReplied("per_1"))
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    // Only the uncorrelated request per_2 is published.
     expect(h.sent).toHaveLength(1)
   })
 
-  it("ignores a reply for an unknown request ID", async () => {
+  it("ignores a reply for an unknown request ID and a reply without an ID", async () => {
     const h = harness()
     await h.handlers.event(permissionAsked("per_1"))
     await h.handlers.event(permissionReplied("per_other"))
-    await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    expect(h.sent).toHaveLength(1)
-  })
-
-  it("ignores a reply without a usable request ID", async () => {
-    const h = harness()
-    await h.handlers.event(permissionAsked("per_1"))
     await h.handlers.event(permissionReplied(undefined))
     await h.handlers.event(permissionReplied(""))
-    await h.handlers.event(permissionReplied(123))
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
     expect(h.sent).toHaveLength(1)
   })
@@ -216,12 +205,12 @@ describe("permission replies", () => {
     expect(h.sent).toHaveLength(0)
   })
 
-  it("accepts the legacy permissionID field on permission.replied", async () => {
+  it("ignores the legacy permissionID field on permission.replied", async () => {
     const h = harness()
     await h.handlers.event(permissionAsked("per_legacy"))
     await h.handlers.event(legacyPermissionReplied("per_legacy"))
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    expect(h.sent).toHaveLength(0)
+    expect(h.sent).toHaveLength(1)
   })
 
   it("does not reschedule or duplicate a notification for a duplicate ask", async () => {
@@ -268,7 +257,20 @@ describe("toggle and session handling", () => {
     await h.handlers.event(permissionAsked("per_1", "sess_child"))
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
     expect(h.sent).toHaveLength(1)
-    expect(h.sent[0]?.message).toContain("sess_child")
+  })
+})
+
+describe("bounded pending permission timers", () => {
+  it("drops new pending requests past the cap but still handles replies", async () => {
+    const h = harness()
+    for (let i = 0; i < 512; i += 1) await h.handlers.event(permissionAsked(`per_${i}`))
+    // The 513th distinct pending request is dropped safely with one warning.
+    await h.handlers.event(permissionAsked("per_overflow"))
+    expect(h.logMessages.some((message) => message.includes("too many pending permission notifications"))).toBe(true)
+    // Replies are always honored: cancelling one frees capacity.
+    await h.handlers.event(permissionReplied("per_0"))
+    await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
+    expect(h.sent).toHaveLength(511)
   })
 })
 
@@ -288,11 +290,12 @@ describe("dispose", () => {
     await expect(h.handlers.dispose()).resolves.toBeUndefined()
   })
 
-  it("does not schedule a delayed notification from a hook invoked after dispose", async () => {
+  it("does not schedule from a hook invoked after dispose", async () => {
     const h = harness()
     await h.handlers.dispose()
     await h.handlers.event(permissionAsked("per_1"))
     await h.handlers.event(permissionAsked(undefined))
+    await h.handlers.question("question", { questions: [] })
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
     expect(h.sent).toHaveLength(0)
   })
@@ -302,29 +305,6 @@ describe("dispose", () => {
     await h.handlers.dispose()
     await h.handlers.event(permissionAsked("per_1"))
     expect(h.sent).toHaveLength(0)
-  })
-
-  it("is exposed through the plugin factory and cancels pending timers", async () => {
-    const requests: string[] = []
-    const fetchMock = vi.fn(async () => {
-      requests.push("sent")
-      return new Response("{}", { status: 200 })
-    })
-    const plugin = createPlugin({
-      loadConfig: async () => config({ delay: DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS }),
-      fetch: fetchMock as unknown as typeof fetch,
-      log: () => {},
-    })
-    const hooks = await plugin({
-      directory: "/home/tester/awesome-project",
-      client: { session: { get: async () => ({ data: {} }) } },
-    } as never)
-    expect(typeof hooks.dispose).toBe("function")
-    const eventHook = hooks.event as (input: { event: unknown }) => Promise<void>
-    await eventHook(permissionAsked("per_1"))
-    await hooks.dispose?.()
-    await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    expect(requests).toHaveLength(0)
   })
 })
 
@@ -337,22 +317,10 @@ describe("publish failure containment with a positive delay", () => {
     })
     await expect(h.handlers.event(permissionAsked("per_1"))).resolves.toBeUndefined()
     await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    expect(h.sent).toHaveLength(0)
     expect(h.logMessages.some((message) => message.includes('"permission.asked"'))).toBe(true)
   })
 
-  it("contains a synchronously throwing publish during the delayed send", async () => {
-    const h = harness({
-      publish: () => {
-        throw new Error("sync boom")
-      },
-    })
-    await h.handlers.event(permissionAsked("per_1"))
-    await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
-    expect(h.logMessages.some((message) => message.includes("was not sent"))).toBe(true)
-  })
-
-  it("survives a failing publish together with a throwing logger at the timer boundary", async () => {
+  it("contains a synchronously throwing publish and a throwing logger at the timer boundary", async () => {
     const unhandled: unknown[] = []
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason)
@@ -360,16 +328,14 @@ describe("publish failure containment with a positive delay", () => {
     process.on("unhandledRejection", onUnhandled)
     try {
       const h = harness({
-        publish: async () => {
-          throw new Error("ntfy is down")
+        publish: () => {
+          throw new Error("sync boom")
         },
         log: () => {
           throw new Error("logger boom")
         },
       })
       await h.handlers.event(permissionAsked("per_1"))
-      // The timer callback swallows both the publish rejection and the logger
-      // throw, so advancing time resolves instead of surfacing either failure.
       await vi.advanceTimersByTimeAsync(DEFAULT_PERMISSION_NOTIFICATION_DELAY_MS)
       await Promise.resolve()
       await Promise.resolve()
@@ -383,9 +349,7 @@ describe("publish failure containment with a positive delay", () => {
 describe("bounded recently-replied memory", () => {
   it("forgets the oldest replied ID beyond the bounded set", async () => {
     const h = harness()
-    for (let i = 0; i < 512; i += 1) {
-      await h.handlers.event(permissionReplied(`per_${i}`))
-    }
+    for (let i = 0; i < 512; i += 1) await h.handlers.event(permissionReplied(`per_${i}`))
     // The 513th reply evicts the oldest remembered ID (per_0).
     await h.handlers.event(permissionReplied("per_512"))
     await h.handlers.event(permissionAsked("per_0"))

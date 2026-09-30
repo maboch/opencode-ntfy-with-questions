@@ -1,7 +1,7 @@
 {
   "name": "opencode-ntfy-with-questions",
-  "version": "0.1.2",
-  "description": "OpenCode 1.x plugin that publishes idle, error, permission and question notifications to ntfy (ntfy.sh or self-hosted).",
+  "version": "0.2.1",
+  "description": "OpenCode 2.x plugin that publishes idle, error, permission and question notifications to ntfy (ntfy.sh or self-hosted).",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -37,7 +37,7 @@
     "notification-ntfy-with-questions.schema.json"
   ],
   "engines": {
-    "opencode": ">=1.18.25",
+    "opencode": ">=2.0.20 <3.0.0",
     "node": ">=20"
   },
   "scripts": {
@@ -48,7 +48,6 @@
     "clean": "rm -rf dist coverage node_modules"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.25",
     "@types/node": "^24.0.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
@@ -56,5 +55,8 @@
     "typescript": "^5.8.2",
     "typescript-eslint": "^8.18.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.20"
   }
 }
