@@ -412,6 +412,7 @@ function allTrueEvents(): Record<NotificationKind, boolean> {
     "session.error": true,
     "permission.asked": true,
     "question.asked": true,
+    "agent.notify": true,
   }
 }
 

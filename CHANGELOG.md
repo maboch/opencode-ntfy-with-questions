@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The package follows semantic versioning; the v1 and v2 lines are intentionally
 incompatible (see Version and install separation below).
 
+## [Unreleased] - 0.2.2
+
+### Fixed
+
+- Idle notifications now fire: `session.execution.succeeded` (the run-completion
+  event in opencode >= 2.2) is the primary idle source. The previous adapter
+  listened for `session.status` with `status.type === "idle"`, which opencode >=
+  2.2 never emits, and its location filter dropped `session.execution.*` events
+  because they carry no `location` field.
+- Location-less `session.execution.*` events are accepted by the runtime and
+  their ownership is verified through the native session lookup (which reports
+  the session directory), so sessions from other project directories are not
+  notified.
+
+### Added
+
+- `agent.notify`: forwards the built-in notify tools (`opencode_notify` /
+  `openchamber_notify`) as a push notification, so "notify me when ..." requests
+  arrive on the phone, not only as browser notifications.
+- Idle de-duplication: when both the primary `session.execution.succeeded` and
+  the legacy `session.status` idle fire for one run, only one notification is
+  sent; a second event from the same source is treated as a new run.
+
 ## [Unreleased] - 0.2.1
 
 Not published yet.

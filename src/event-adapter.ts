@@ -14,7 +14,7 @@ export type LifecycleAction = "created" | "deleted"
 
 export type ParsedEvent =
   | { kind: "lifecycle"; action: LifecycleAction; sessionID: string; parentID: string | null }
-  | { kind: "session.idle"; sessionID: string }
+  | { kind: "session.idle"; sessionID: string; source: "execution.succeeded" | "session.status" }
   | { kind: "session.error"; sessionID: string | undefined; errorMessage: string }
   | {
       kind: "permission.asked"
@@ -29,6 +29,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
 }
 
+/**
+ * Extracts the canonical directory from an event's `location`, if present.
+ * Missing or malformed locations return undefined. Note: `session.execution.*`
+ * events carry no location at all in opencode >= 2.2, so callers that need
+ * ownership must fall back to a session lookup.
+ */
+export function eventLocationDirectory(event: unknown): string | undefined {
+  const record = asRecord(event)
+  const location = asRecord(record?.["location"])
+  const directory = location?.["directory"]
+  return typeof directory === "string" && directory !== "" ? directory : undefined
+}
+
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined
 }
@@ -41,8 +54,13 @@ function nonEmptyString(value: unknown): string | undefined {
  * - `question.*` / `question.v2.*` / `form.*`: question notifications come
  *   exclusively from the `tool.execute.before` hook filtered by the exact tool
  *   name `question`, so a question is never notified twice.
- * - the deprecated `session.idle`: `session.status` with `status.type === "idle"`
- *   is the single source of idle notifications (avoids a duplicate per run).
+ * - `session.idle`: the primary idle signal is `session.execution.succeeded`
+ *   (the run-completion event in opencode >= 2.2); `session.status` with
+ *   `status.type === "idle"` is kept as a secondary source for older or
+ *   TUI-driven contexts. Both narrow to `kind: "session.idle"` and are
+ *   de-duplicated per session in the notification handlers.
+ * - `session.execution.started` / `session.execution.interrupted`: transient
+ *   or cancelled runs are not completion signals.
  * - the legacy `session.error` (native errors arrive as
  *   `session.execution.failed`) and transient `session.step.failed` /
  *   `session.retry.scheduled` frames.
@@ -75,9 +93,18 @@ export function parseRuntimeEvent(envelope: unknown): ParsedEvent | null {
       if (!sessionID) return null
       const status = asRecord(data?.status)
       // Only the terminal `idle` status notifies; `busy` and `retry` are
-      // transient and are ignored.
+      // transient and are ignored. This is a secondary idle source for older
+      // or TUI-driven contexts; `session.execution.succeeded` is the primary.
       if (nonEmptyString(status?.type) !== "idle") return null
-      return { kind: "session.idle", sessionID }
+      return { kind: "session.idle", sessionID, source: "session.status" }
+    }
+    case "session.execution.succeeded": {
+      // Run completed: the primary idle signal in opencode >= 2.2. The event
+      // carries only the sessionID (no location), so ownership is verified by
+      // the runtime/handlers via the session lookup.
+      const sessionID = nonEmptyString(data?.sessionID)
+      if (!sessionID) return null
+      return { kind: "session.idle", sessionID, source: "execution.succeeded" }
     }
     case "session.execution.failed": {
       const sessionID = nonEmptyString(data?.sessionID)
@@ -132,8 +159,37 @@ function draft(kind: NotificationDraft["kind"], title: string, message: string):
   return { kind, title, message, tags: [kindTags[kind]] }
 }
 
-export function formatIdleDraft(sessionID: string, projectName: string): NotificationDraft {
-  const message = `Session ${sessionID} has finished its run and is idle.\nIt is waiting for your next instruction.`
+/**
+ * Formats the args of the built-in notify tools (`opencode_notify` /
+ * `openchamber_notify`) into a push notification. The tool schema accepts
+ * `{ action?, parameters?: { title, body? } }` (or flat `{ title, body? }`).
+ * Missing or malformed payloads produce one generic notification instead of
+ * throwing.
+ */
+export function formatNotifyDraft(args: unknown, projectName: string): NotificationDraft {
+  const record = asRecord(args)
+  const parameters = asRecord(record?.["parameters"])
+  const title =
+    nonEmptyString(record?.["title"]) ?? nonEmptyString(parameters?.["title"]) ?? "notification"
+  const body =
+    nonEmptyString(record?.["body"]) ??
+    nonEmptyString(parameters?.["body"]) ??
+    "The agent asked to notify you."
+  return draft("agent.notify", `${projectName} - ${title}`, body)
+}
+
+export function formatIdleDraft(
+  sessionID: string,
+  projectName: string,
+  details: { title?: string | null; lastMessage?: string | null } = {},
+): NotificationDraft {
+  // Prefer a human session title over the opaque session ID.
+  const subject = details.title && details.title.trim() !== "" ? details.title : sessionID
+  let message = `Session "${subject}" has finished its run and is idle.\nIt is waiting for your next instruction.`
+  const lastMessage = details.lastMessage?.trim()
+  if (lastMessage && lastMessage !== "") {
+    message = `Session "${subject}" finished. Last output:\n${lastMessage}`
+  }
   return draft("session.idle", `${projectName} - session idle`, message)
 }
 

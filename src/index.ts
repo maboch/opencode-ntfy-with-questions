@@ -31,6 +31,58 @@ export function projectLabel(directory: string): string {
   return "opencode"
 }
 
+/**
+ * Best-effort extraction of the last assistant output of a session for the
+ * idle notification body. `session.context` returns the session's message
+ * list; the assistant's final text parts are joined and truncated so the push
+ * shows what was actually done instead of an opaque session ID. Returns null
+ * when the session has no assistant output or the call fails.
+ */
+export async function lastAssistantOutput(
+  ctx: { session: { context(input: { sessionID: string }): Promise<unknown> } },
+  sessionID: string,
+): Promise<string | null> {
+  try {
+    const result = await ctx.session.context({ sessionID })
+    const messages = Array.isArray(result) ? result : []
+    // Walk back from the newest message to the last assistant text.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i]
+      if (typeof message !== "object" || message === null) continue
+      const text = assistantTextOf(message)
+      if (text !== null) return text
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function assistantTextOf(message: Record<string, unknown>): string | null {
+  if (message["type"] !== "assistant") return null
+  const content = message["content"]
+  if (Array.isArray(content)) {
+    const parts: string[] = []
+    for (const part of content) {
+      if (typeof part === "object" && part !== null && part["type"] === "text") {
+        const text = part["text"]
+        if (typeof text === "string") parts.push(text)
+      }
+    }
+    if (parts.length > 0) return truncate(parts.join("\n"))
+  }
+  const flat = message["text"]
+  if (typeof flat === "string" && flat !== "") return truncate(flat)
+  return null
+}
+
+const MAX_MESSAGE_CHARS = 500
+
+function truncate(text: string): string {
+  if (text.length <= MAX_MESSAGE_CHARS) return text
+  return `${text.slice(0, MAX_MESSAGE_CHARS)}…`
+}
+
 export interface CreatePluginDeps {
   /** Overrides config loading (default: read from the opencode config dir). */
   loadConfig?: () => Promise<PluginConfig>
@@ -66,9 +118,12 @@ export function createPlugin(deps: CreatePluginDeps = {}): Plugin.Plugin {
       const handlers = createPluginHandlers({
         config,
         projectName: projectLabel(ctx.location.directory),
+        directory: ctx.location.directory,
         // # Reason: native `session.get` resolves directly to the session info,
-        // so the core reads `parentID` off the result with no data/error wrapper.
+        // so the core reads `parentID` and `location.directory` off the result
+        // with no data/error wrapper.
         getSession: (sessionID) => ctx.session.get({ sessionID }),
+        getLastMessage: (sessionID) => lastAssistantOutput(ctx, sessionID),
         ntfy,
         registry: new SessionRegistry(),
         log,
@@ -78,6 +133,7 @@ export function createPlugin(deps: CreatePluginDeps = {}): Plugin.Plugin {
       try {
         toolRegistration = await ctx.tool.hook("execute.before", async (event) => {
           await handlers.question(event.tool, event.input)
+          await handlers.notify(event.tool, event.input)
         })
       } catch (error) {
         // # Reason: the event stream was not started yet, so the handlers hold

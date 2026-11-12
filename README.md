@@ -3,11 +3,12 @@
 OpenCode 2.x plugin that publishes notifications to [ntfy](https://ntfy.sh)
 (ntfy.sh or a self-hosted instance) when:
 
-- a session finishes its run and becomes idle (`session.status` with
-  `status.type === "idle"`),
+- a session finishes its run and becomes idle (`session.execution.succeeded`),
 - a session reports an error (`session.execution.failed`),
 - opencode asks you to approve a permission (`permission.asked`),
-- the agent invokes the built-in `question` tool.
+- the agent invokes the built-in `question` tool,
+- the agent explicitly asks to notify you (the built-in
+  `opencode_notify` / `openchamber_notify` tools).
 
 Subagent (child session) idle/error chatter is suppressed by default so only
 notifications that need a human land on your phone. The only runtime dependency
@@ -181,7 +182,8 @@ The JSON Schema for editor validation is packaged with the plugin at
     "session.idle": true,
     "session.error": true,
     "permission.asked": true,
-    "question.asked": true
+    "question.asked": true,
+    "agent.notify": true
   },
   "suppressSubagents": {
     "session.idle": true,
@@ -236,7 +238,7 @@ strings that merely contain unrelated braces are left untouched.
 | Option | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | Set to `false` to keep the plugin loaded but send nothing. |
-| `events` | all `true` | Toggles per notification kind: `session.idle`, `session.error`, `permission.asked`, `question.asked`. |
+| `events` | all `true` | Toggles per notification kind: `session.idle`, `session.error`, `permission.asked`, `question.asked`, `agent.notify`. |
 | `suppressSubagents` | both `true` | Suppress `session.idle` / `session.error` notifications for known subagent sessions. |
 | `permissionNotificationDelayMs` | `15000` | Grace period in ms (integer `0`-`300000`) before a `permission.asked` notification is published. A matching `permission.replied` within the window suppresses it. `0` publishes immediately. |
 | `ntfy.server` | `https://ntfy.sh` | Base URL, http(s), DNS/IPv4/localhost/bracketed-IPv6 host, optional canonical port, optional reverse-proxy path prefix. Credentials, whitespace, query strings and fragments are rejected. May instead be one full-value `{env:...}`/`{file:...}` reference. |
@@ -257,8 +259,12 @@ variable names and paths.
 The plugin subscribes once to the global opencode v2 event stream. The stream is
 shared across server locations, so the plugin keeps only events whose
 `location.directory` exactly equals the plugin's own location directory
-(`ctx.location.directory`); events without a matching location are ignored. The
-stream is volatile: there is no replay of events missed while disconnected.
+(`ctx.location.directory`). In opencode >= 2.2 the `session.execution.*` events
+(the run lifecycle) carry no `location` at all, so those are accepted as well
+and their ownership is verified through the native session lookup, which
+reports the session's directory. Events that fail the ownership check (a
+session that belongs to another project directory) are not notified. The stream
+is volatile: there is no replay of events missed while disconnected.
 
 Recognized native events:
 
@@ -267,9 +273,11 @@ Recognized native events:
   the session ID and an optional `parentID`. `session.deleted` removes the
   entry; a later event for the same session is unknown again and may start a
   fresh fallback lookup.
-- Idle: `session.status` where `status.type` is `idle`. This is the only idle
-  source; the deprecated `session.idle` event is ignored so a run never produces
-  two idle notifications.
+- Idle: `session.execution.succeeded` (the run-completion event in opencode >=
+  2.2) is the primary idle source. `session.status` where `status.type` is
+  `idle` is kept as a secondary source for older or TUI-driven contexts; if a
+  context emits both for one run, the plugin de-duplicates them so a run never
+  produces two idle notifications.
 - Error: `session.execution.failed`. Only the error `type` and its message are
   used; the transient `session.step.failed` / `session.retry.scheduled` frames
   and the legacy `session.error` event are ignored.
@@ -280,11 +288,16 @@ Recognized native events:
 - `question.*` / `form.*` runtime events are ignored: question notifications
   come exclusively from the `execute.before` tool hook filtered by the exact
   tool name `question`, so one question produces exactly one notification.
+- Agent-initiated notifications: the `execute.before` tool hook also forwards
+  the built-in notify tools (`opencode_notify` / `openchamber_notify`) as an
+  `agent.notify` push, so "notify me when ..." requests arrive on your phone,
+  not just in a browser notification.
 - `session.updated` is not emitted in v2 and is ignored if it appears.
 
 On idle / error the cache is consulted first. On a cache miss the plugin calls
 the native session lookup (`ctx.session.get`) as a fallback and records the
-result. Suppression only happens when a parent session is known to exist.
+result (parent and directory). Suppression only happens when a parent session
+is known to exist, and ownership only when the directory is known to differ.
 
 - Fallback lookups are bounded: each lookup races the native session lookup
   against a fixed 5000 ms deadline, and concurrent misses for the same session

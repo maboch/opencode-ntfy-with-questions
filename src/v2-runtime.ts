@@ -15,7 +15,7 @@
  * and permission frames bypass that cap and are always dispatched.
  */
 
-import { parseRuntimeEvent } from "./event-adapter.js"
+import { eventLocationDirectory, parseRuntimeEvent } from "./event-adapter.js"
 import type { Logger } from "./notification-handlers.js"
 
 export interface RuntimeEventSource {
@@ -53,23 +53,25 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Extracts the canonical directory from an event's `location`, if present.
- * Missing or malformed locations return undefined and are ignored by callers.
- */
-export function eventLocationDirectory(event: unknown): string | undefined {
-  const record = asRecord(event)
-  const location = asRecord(record?.["location"])
-  const directory = location?.["directory"]
-  return typeof directory === "string" && directory !== "" ? directory : undefined
-}
-
-/**
  * True only when the event carries the exact plugin directory. Locations are
  * canonical in the API, so no normalization is applied (and no session lookup
  * fallback is performed, which would add ordering/deadline hazards).
  */
 export function isLocalEvent(event: unknown, directory: string): boolean {
   return eventLocationDirectory(event) === directory
+}
+
+/**
+ * True for native events that may carry no `location` at all. In opencode >=
+ * 2.2, `session.execution.*` events (the run lifecycle) are emitted without a
+ * location, so directory filtering cannot drop them; ownership is instead
+ * verified by the handlers through a session lookup. An execution event that
+ * DOES carry a location is filtered by directory like any other event.
+ */
+export function isLocationlessExecutionEvent(event: unknown): boolean {
+  const record = asRecord(event)
+  const type = typeof record?.["type"] === "string" ? (record["type"] as string) : null
+  return type !== null && type.startsWith("session.execution.") && eventLocationDirectory(event) === undefined
 }
 
 /**
@@ -155,9 +157,11 @@ export function createV2Runtime(deps: V2RuntimeDeps): V2Runtime {
         subscribed = true
         for await (const event of stream) {
           if (disposed) break
-          // # Reason: the v2 stream is global; a foreign or missing location is
-          // dropped without a lookup fallback to avoid ordering/deadline races.
-          if (!isLocalEvent(event, directory)) continue
+          // # Reason: the v2 stream is global. Events with a location must
+          // match the plugin directory exactly; `session.execution.*` events
+          // carry no location at all, so they are accepted and their ownership
+          // is verified by the handlers through a session lookup.
+          if (!isLocalEvent(event, directory) && !isLocationlessExecutionEvent(event)) continue
           // # Reason: validate against the native adapter FIRST. Only a
           // recognized native event proves the stream is healthy; unknown or
           // malformed frames are ignored entirely and must not reset the

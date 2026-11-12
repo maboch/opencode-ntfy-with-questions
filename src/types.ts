@@ -7,6 +7,7 @@ export const notificationKinds = [
   "session.error",
   "permission.asked",
   "question.asked",
+  "agent.notify",
 ] as const
 
 export type NotificationKind = (typeof notificationKinds)[number]
@@ -22,6 +23,7 @@ export const kindTags: Record<NotificationKind, string> = {
   "session.error": "warning",
   "permission.asked": "lock",
   "question.asked": "question",
+  "agent.notify": "bell",
 }
 
 export interface NtfySettings {
@@ -37,6 +39,13 @@ export interface SuppressSubagentSettings {
   "session.idle": boolean
   "session.error": boolean
 }
+
+/** Exact names of the built-in tools that notify the user. */
+export const NOTIFY_TOOL_NAMES = ["opencode_notify", "openchamber_notify"] as const
+export type NotifyToolName = (typeof NOTIFY_TOOL_NAMES)[number]
+
+/** Default minimum seconds between two idle notifications for the same session. */
+export const DEFAULT_IDLE_DEDUPE_WINDOW_MS = 5000
 
 export interface PluginConfig {
   enabled: boolean
