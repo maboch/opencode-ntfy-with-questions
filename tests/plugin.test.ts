@@ -30,6 +30,7 @@ function harness(
     publish?: (message: NtfyMessage) => Promise<void> | void
     get?: (sessionID: string) => Promise<SessionLookupResult>
     log?: Logger
+    directory?: string
   } = {},
 ) {
   const sent: NtfyMessage[] = []
@@ -48,6 +49,7 @@ function harness(
   const handlers = createPluginHandlers({
     config: overrides.config ?? config(),
     projectName: "demo-project",
+    directory: overrides.directory,
     getSession: getMock,
     ntfy,
     registry,
@@ -58,6 +60,9 @@ function harness(
 
 const idle = (sessionID: string) => ({
   event: { id: "evt_idle", type: "session.status", created: 1, data: { sessionID, status: { type: "idle" } } },
+})
+const executionSucceeded = (sessionID: string) => ({
+  event: { id: "evt_done", type: "session.execution.succeeded", created: 1, data: { sessionID } },
 })
 const sessionError = (sessionID: string | undefined, error?: unknown) => ({
   event: {
@@ -131,6 +136,35 @@ describe("idle and error routing", () => {
     h.registry.record("sess_child", "sess_parent")
     await h.handlers.event(idle("sess_child"))
     await h.handlers.event(sessionError("sess_child"))
+    expect(h.sent).toHaveLength(2)
+  })
+
+  it("notifies on session.execution.succeeded (the v2 completion event) for a known /api session", async () => {
+    const h = harness()
+    h.registry.record("sess_/api", null)
+    await h.handlers.event(executionSucceeded("sess_/api"))
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]?.tags).toEqual(["hourglass_done"])
+    expect(h.sent[0]?.title).toContain("demo-project")
+    expect(h.getMock).not.toHaveBeenCalled()
+  })
+
+  it("suppresses session.execution.succeeded for a known child session", async () => {
+    const h = harness()
+    h.registry.record("sess_child", "sess_parent")
+    await h.handlers.event(executionSucceeded("sess_child"))
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it("deduplicates idle when both v2 sources fire for the same run", async () => {
+    const h = harness()
+    h.registry.record("sess_/api", null)
+    // Primary completion event and the legacy idle status for one run.
+    await h.handlers.event(executionSucceeded("sess_/api"))
+    await h.handlers.event(idle("sess_/api"))
+    expect(h.sent).toHaveLength(1)
+    // A second completion (a new run) notifies again.
+    await h.handlers.event(executionSucceeded("sess_/api"))
     expect(h.sent).toHaveLength(2)
   })
 })
@@ -353,6 +387,89 @@ describe("failure containment", () => {
     h.registry.record("sess_root", null)
     await expect(h.handlers.event(idle("sess_root"))).resolves.toBeUndefined()
     await expect(h.handlers.question("question", { questions: [] })).resolves.toBeUndefined()
+  })
+})
+
+describe("ownership of location-less execution events", () => {
+  it("notifies when the session belongs to the plugin directory", async () => {
+    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/home/tester/proj" }) })
+    await h.handlers.event(executionSucceeded("sess_mine"))
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it("skips a session that belongs to another directory", async () => {
+    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/other/proj" }) })
+    await h.handlers.event(executionSucceeded("sess_foreign"))
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it("skips a session whose directory is cached from a previous lookup", async () => {
+    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/other/proj" }) })
+    await h.handlers.event(executionSucceeded("sess_cached_foreign"))
+    expect(h.sent).toHaveLength(0)
+    // Second event hits the registry cache, no further lookup needed.
+    await h.handlers.event(executionSucceeded("sess_cached_foreign"))
+    expect(h.sent).toHaveLength(0)
+    expect(h.getMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("fails open when the session directory cannot be determined", async () => {
+    const h = harness({ directory: "/home/tester/proj", get: async () => ({}) })
+    await h.handlers.event(executionSucceeded("sess_unknown_dir"))
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it("always accepts events that carry a location (already filtered by the runtime)", async () => {
+    const h = harness({ directory: "/home/tester/proj" })
+    await h.handlers.event(idle("sess_local_status"))
+    expect(h.sent).toHaveLength(1)
+  })
+})
+
+describe("agent notify routing", () => {
+  const notifyArgs = { action: "notify.send", parameters: { title: "Build finished", body: "npm run build succeeded" } }
+
+  it("forwards an opencode_notify call to ntfy", async () => {
+    const h = harness()
+    await h.handlers.notify("opencode_notify", notifyArgs)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]?.tags).toEqual(["bell"])
+    expect(h.sent[0]?.title).toContain("Build finished")
+    expect(h.sent[0]?.message).toContain("npm run build succeeded")
+  })
+
+  it("forwards an openchamber_notify call to ntfy", async () => {
+    const h = harness()
+    await h.handlers.notify("openchamber_notify", { action: "notify.send", parameters: { title: "Done" } })
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]?.title).toContain("Done")
+  })
+
+  it("ignores other tools and respects the agent.notify toggle", async () => {
+    const h = harness()
+    await h.handlers.notify("bash", notifyArgs)
+    expect(h.sent).toHaveLength(0)
+    const off = harness({ config: config({ events: { "agent.notify": false } }) })
+    await off.handlers.notify("opencode_notify", notifyArgs)
+    expect(off.sent).toHaveLength(0)
+  })
+
+  it("sends one generic notification for malformed args instead of throwing", async () => {
+    for (const args of [null, undefined, "text", {}]) {
+      const h = harness()
+      await expect(h.handlers.notify("opencode_notify", args)).resolves.toBeUndefined()
+      expect(h.sent).toHaveLength(1)
+      expect(h.sent[0]?.message).toContain("notify you")
+    }
+  })
+
+  it("never blocks the notify tool when publishing fails", async () => {
+    const h = harness({
+      publish: async () => {
+        throw new Error("down")
+      },
+    })
+    await expect(h.handlers.notify("opencode_notify", notifyArgs)).resolves.toBeUndefined()
   })
 })
 

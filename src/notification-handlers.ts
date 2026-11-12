@@ -9,8 +9,10 @@
  */
 
 import {
+  eventLocationDirectory,
   formatErrorDraft,
   formatIdleDraft,
+  formatNotifyDraft,
   formatPermissionDraft,
   formatQuestionDraft,
   parseRuntimeEvent,
@@ -18,7 +20,9 @@ import {
 import { describeNtfyError, type NtfyClient } from "./ntfy-client.js"
 import { SessionRegistry } from "./session-registry.js"
 import {
+  DEFAULT_IDLE_DEDUPE_WINDOW_MS,
   DEFAULT_SESSION_LOOKUP_TIMEOUT_MS,
+  NOTIFY_TOOL_NAMES,
   QUESTION_TOOL_NAME,
   type NotificationDraft,
   type PluginConfig,
@@ -31,17 +35,22 @@ export function defaultLogger(message: string): void {
 }
 
 /**
- * Neutral session lookup result: only the parent classification is needed.
+ * Neutral session lookup result: only the parent classification and, for
+ * location-less execution events, the session's directory are needed.
  * `parentID` absent or empty means the session is a root.
  */
 export interface SessionLookupResult {
   parentID?: string | null
+  /** The session's location directory; undefined when the lookup cannot tell. */
+  directory?: string | null
 }
 
 export interface HandlerDeps {
   config: PluginConfig
   /** Display name for notifications: the basename of the project directory. */
   projectName: string
+  /** The plugin's own location directory; ownership of location-less events. */
+  directory?: string
   /** Resolves one session directly; rejects on transport failure. */
   getSession: (sessionID: string) => Promise<SessionLookupResult>
   ntfy: NtfyClient
@@ -52,6 +61,11 @@ export interface HandlerDeps {
    * DEFAULT_SESSION_LOOKUP_TIMEOUT_MS; tests inject small values.
    */
   sessionLookupTimeoutMs?: number
+  /**
+   * Minimum gap between two idle notifications for the same session. Defaults
+   * to DEFAULT_IDLE_DEDUPE_WINDOW_MS; tests inject small values.
+   */
+  idleDedupeWindowMs?: number
 }
 
 /**
@@ -66,6 +80,8 @@ export function resolveSessionLookupTimeout(value: number | undefined): number {
 export interface PluginHandlers {
   event(input: { event: unknown }): Promise<void>
   question(tool: string, args: unknown): Promise<void>
+  /** Forwards an agent-initiated notification request (notify tool) to ntfy. */
+  notify(tool: string, args: unknown): Promise<void>
   /** Cancels every pending delayed permission notification. */
   dispose(): Promise<void>
 }
@@ -236,6 +252,7 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     for (const timer of anonymousPermissionTimers) clearTimeout(timer)
     anonymousPermissionTimers.clear()
     recentlyRepliedRequestIDs.clear()
+    lastIdleSourceAt.clear()
     pendingClassifications.clear()
     registry.clear()
   }
@@ -293,10 +310,13 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
       }
 
       // Native `session.get` resolves directly to the session info, so the
-      // parent ID is read straight off the response.
+      // parent ID and directory are read straight off the response.
       const rawParent = usable.parentID
       const parent = typeof rawParent === "string" && rawParent !== "" ? rawParent : null
-      registry.record(sessionID, parent)
+      const rawDirectory = usable.directory
+      const sessionDirectory =
+        typeof rawDirectory === "string" && rawDirectory !== "" ? rawDirectory : null
+      registry.record(sessionID, parent, sessionDirectory)
       return parent !== null
     } finally {
       registry.endLookup(sessionID)
@@ -327,6 +347,49 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     return classification
   }
 
+  /**
+   * True when the event belongs to this plugin's location. Events that carry a
+   * location were already filtered by the runtime, so they are always owned.
+   * Location-less `session.execution.*` events cannot be filtered there; their
+   * ownership is verified from the session directory recorded by the
+   * classification (or the lifecycle cache). An unknown directory fails open,
+   * matching the lookup philosophy: an unclassifiable session never silently
+   * loses a notification.
+   */
+  const ownsDirectory = async (sessionID: string, rawEvent: unknown): Promise<boolean> => {
+    if (eventLocationDirectory(rawEvent) !== undefined) return true
+    const known = registry.directoryOf(sessionID)
+    if (known !== undefined) return deps.directory === undefined || known === deps.directory
+    // Directory unknown (lookup failed or suppression disabled): fail open.
+    return true
+  }
+
+  /**
+   * True when an idle notification for this session was already sent by the
+   * other idle source within the dedupe window. Both `session.execution.succeeded`
+   * (primary) and `session.status` idle (secondary) narrow to the same internal
+   * kind, so a context that emits both for one run must not produce two
+   * notifications; two events from the SAME source are treated as separate
+   * runs and both notify.
+   */
+  const idleDedupeWindowMs = deps.idleDedupeWindowMs ?? DEFAULT_IDLE_DEDUPE_WINDOW_MS
+  const lastIdleSourceAt = new Map<string, { source: "execution.succeeded" | "session.status"; at: number }>()
+
+  const shouldDedupeIdle = (
+    sessionID: string,
+    source: "execution.succeeded" | "session.status",
+  ): boolean => {
+    const now = Date.now()
+    const last = lastIdleSourceAt.get(sessionID)
+    if (last !== undefined && last.source !== source && now - last.at < idleDedupeWindowMs) return true
+    lastIdleSourceAt.set(sessionID, { source, at: now })
+    if (lastIdleSourceAt.size > MAX_RECENTLY_REPLIED_REQUEST_IDS) {
+      const oldest = lastIdleSourceAt.keys().next().value
+      if (oldest !== undefined) lastIdleSourceAt.delete(oldest)
+    }
+    return false
+  }
+
   const onEvent = async (input: { event: unknown }): Promise<void> => {
     if (disposed) return
     try {
@@ -341,16 +404,26 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
           return
         case "session.idle": {
           if (!config.events["session.idle"]) return
-          if (config.suppressSubagents["session.idle"] && (await isChild(parsed.sessionID))) return
-          // Cleanup may have happened while the classification was in flight.
+          // Location-less execution events must belong to this plugin's
+          // directory. The classification below records the session directory,
+          // so the ownership check reuses it. Events that carry a location
+          // were already filtered by the runtime.
+          const child = config.suppressSubagents["session.idle"] && (await isChild(parsed.sessionID))
+          if (!(await ownsDirectory(parsed.sessionID, input?.event))) return
+          if (child) return
           if (disposed) return
+          if (shouldDedupeIdle(parsed.sessionID, parsed.source)) return
           await send(formatIdleDraft(parsed.sessionID, projectName))
           return
         }
         case "session.error": {
           if (!config.events["session.error"]) return
           // An error without a sessionID cannot be classified and always notifies.
-          if (parsed.sessionID && config.suppressSubagents["session.error"] && (await isChild(parsed.sessionID))) return
+          if (parsed.sessionID) {
+            const child = config.suppressSubagents["session.error"] && (await isChild(parsed.sessionID))
+            if (!(await ownsDirectory(parsed.sessionID, input?.event))) return
+            if (child) return
+          }
           if (disposed) return
           await send(formatErrorDraft(parsed.sessionID, parsed.errorMessage, projectName))
           return
@@ -398,5 +471,19 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     }
   }
 
-  return { event: onEvent, question: onQuestion, dispose }
+  const onNotify = async (tool: string, args: unknown): Promise<void> => {
+    if (disposed) return
+    try {
+      if (!config.events["agent.notify"]) return
+      // Notify only for the built-in notify tools. The agent's explicit
+      // "notify me when ..." request becomes a push notification.
+      if (typeof tool !== "string" || !(NOTIFY_TOOL_NAMES as readonly string[]).includes(tool)) return
+      await send(formatNotifyDraft(args, projectName))
+    } catch (error) {
+      // A notify notification must never prevent the tool from executing.
+      safeLog(`notify notification failed: ${describeNtfyError(error)}`)
+    }
+  }
+
+  return { event: onEvent, question: onQuestion, notify: onNotify, dispose }
 }

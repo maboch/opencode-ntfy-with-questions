@@ -66,8 +66,10 @@ export function createPlugin(deps: CreatePluginDeps = {}): Plugin.Plugin {
       const handlers = createPluginHandlers({
         config,
         projectName: projectLabel(ctx.location.directory),
+        directory: ctx.location.directory,
         // # Reason: native `session.get` resolves directly to the session info,
-        // so the core reads `parentID` off the result with no data/error wrapper.
+        // so the core reads `parentID` and `location.directory` off the result
+        // with no data/error wrapper.
         getSession: (sessionID) => ctx.session.get({ sessionID }),
         ntfy,
         registry: new SessionRegistry(),
@@ -78,6 +80,7 @@ export function createPlugin(deps: CreatePluginDeps = {}): Plugin.Plugin {
       try {
         toolRegistration = await ctx.tool.hook("execute.before", async (event) => {
           await handlers.question(event.tool, event.input)
+          await handlers.notify(event.tool, event.input)
         })
       } catch (error) {
         // # Reason: the event stream was not started yet, so the handlers hold

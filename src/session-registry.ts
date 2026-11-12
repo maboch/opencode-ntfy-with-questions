@@ -8,6 +8,10 @@
  * non-empty string is the parent (subagent) session, `null` means the session
  * is a known root, and an entry can be absent (unknown).
  *
+ * The directory cache stores the session's location directory when known, so
+ * the plugin can verify ownership of location-less `session.execution.*`
+ * events (which carry no `location` in opencode >= 2.2).
+ *
  * Lookup tracking exists only while a fallback `session.get` is in flight. Each
  * `record`/`remove`/`clear` bumps the generation of the affected session(s), so
  * a lookup that started before a lifecycle event (for example
@@ -28,6 +32,7 @@ interface LookupState {
 
 export class SessionRegistry {
   private readonly parents = new Map<string, string | null>()
+  private readonly directories = new Map<string, string>()
   private readonly lookups = new Map<string, LookupState>()
 
   /**
@@ -35,16 +40,21 @@ export class SessionRegistry {
    * A missing or empty parentID means the session has no parent (root).
    * Invalidates any in-flight lookup for the session.
    */
-  record(sessionID: string, parentID: string | null | undefined): void {
+  record(sessionID: string, parentID: string | null | undefined, directory?: string | null): void {
     if (sessionID === "") return
     this.invalidateLookup(sessionID)
     this.parents.set(sessionID, parentID && parentID !== "" ? parentID : null)
+    if (directory !== undefined) {
+      if (directory === null || directory === "") this.directories.delete(sessionID)
+      else this.directories.set(sessionID, directory)
+    }
   }
 
   /** Removes a session (session.deleted) and invalidates its in-flight lookups. */
   remove(sessionID: string): void {
     this.invalidateLookup(sessionID)
     this.parents.delete(sessionID)
+    this.directories.delete(sessionID)
   }
 
   /**
@@ -57,6 +67,14 @@ export class SessionRegistry {
     return this.parents.get(sessionID)
   }
 
+  /**
+   * Returns the cached location directory of a session, or undefined when it
+   * is not known (for example a session learned only from a lifecycle event).
+   */
+  directoryOf(sessionID: string): string | undefined {
+    return this.directories.get(sessionID)
+  }
+
   /** Number of cached sessions. */
   get size(): number {
     return this.parents.size
@@ -65,6 +83,7 @@ export class SessionRegistry {
   /** Clears every cached parent and invalidates all in-flight lookups. */
   clear(): void {
     this.parents.clear()
+    this.directories.clear()
     for (const sessionID of this.lookups.keys()) this.invalidateLookup(sessionID)
   }
 

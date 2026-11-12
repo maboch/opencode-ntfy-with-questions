@@ -119,6 +119,33 @@ describe("location filtering", () => {
     await runtime.dispose()
   })
 
+  it("dispatches location-less session.execution events (no location in opencode >= 2.2)", async () => {
+    const dispatch = vi.fn(async () => {})
+    const succeeded = { id: "evt_ok", type: "session.execution.succeeded", created: 1, data: { sessionID: "sess_done" } }
+    const failed = {
+      id: "evt_fail",
+      type: "session.execution.failed",
+      created: 1,
+      data: { sessionID: "sess_broken", error: { type: "ProviderError", message: "boom" } },
+    }
+    // A foreign-location execution event is still filtered (it has a location).
+    const foreignExec = {
+      id: "evt_foreign",
+      type: "session.execution.succeeded",
+      created: 1,
+      location: { directory: "/somewhere/else" },
+      data: { sessionID: "sess_foreign" },
+    }
+    const { source } = scriptedSource([[succeeded, failed, foreignExec]])
+    const runtime = createV2Runtime({ events: source, directory, dispatch })
+    runtime.start()
+    await flush()
+    expect(dispatch).toHaveBeenCalledTimes(2)
+    expect(dispatch).toHaveBeenCalledWith(succeeded)
+    expect(dispatch).toHaveBeenCalledWith(failed)
+    await runtime.dispose()
+  })
+
   it("exposes a strict location helper", () => {
     expect(isLocalEvent(local("a"), directory)).toBe(true)
     expect(isLocalEvent(foreign("a"), directory)).toBe(false)

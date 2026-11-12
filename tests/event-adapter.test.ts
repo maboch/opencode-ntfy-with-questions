@@ -50,6 +50,7 @@ describe("parseRuntimeEvent native shapes", () => {
     expect(parseRuntimeEvent(envelope("session.status", { sessionID: "sess_1", status: { type: "idle" } }))).toEqual({
       kind: "session.idle",
       sessionID: "sess_1",
+      source: "session.status",
     })
   })
 
@@ -97,8 +98,15 @@ describe("parseRuntimeEvent native shapes", () => {
     expect(parseRuntimeEvent(envelope("session.step.failed", { sessionID: "sess_1", error: {} }))).toBeNull()
     expect(parseRuntimeEvent(envelope("session.retry.scheduled", { sessionID: "sess_1" }))).toBeNull()
     expect(parseRuntimeEvent(envelope("session.execution.started", { sessionID: "sess_1" }))).toBeNull()
-    expect(parseRuntimeEvent(envelope("session.execution.succeeded", { sessionID: "sess_1" }))).toBeNull()
     expect(parseRuntimeEvent(envelope("session.execution.interrupted", { sessionID: "sess_1" }))).toBeNull()
+  })
+
+  it("maps session.execution.succeeded to an internal session.idle event", () => {
+    expect(parseRuntimeEvent(envelope("session.execution.succeeded", { sessionID: "sess_1" }))).toEqual({
+      kind: "session.idle",
+      sessionID: "sess_1",
+      source: "execution.succeeded",
+    })
   })
 
   it("parses native permission.asked action/resources/id", () => {
