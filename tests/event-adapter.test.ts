@@ -187,7 +187,19 @@ describe("notification formatting", () => {
     expect(formatIdleDraft("sess_1", "proj")).toEqual({
       kind: "session.idle",
       title: "proj - session idle",
-      message: "Session sess_1 has finished its run and is idle.\nIt is waiting for your next instruction.",
+      message: 'Session "sess_1" has finished its run and is idle.\nIt is waiting for your next instruction.',
+      tags: ["hourglass_done"],
+    })
+    // A human session title and the last output replace the opaque session ID.
+    expect(
+      formatIdleDraft("sess_1", "proj", {
+        title: "Fix login bug",
+        lastMessage: "Fixed the redirect loop.",
+      }),
+    ).toEqual({
+      kind: "session.idle",
+      title: "proj - session idle",
+      message: 'Session "Fix login bug" finished. Last output:\nFixed the redirect loop.',
       tags: ["hourglass_done"],
     })
     expect(formatErrorDraft(undefined, "Boom: bad", "proj").message).toBe("A session reported an error:\nBoom: bad")

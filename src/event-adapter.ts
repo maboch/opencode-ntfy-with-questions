@@ -178,8 +178,18 @@ export function formatNotifyDraft(args: unknown, projectName: string): Notificat
   return draft("agent.notify", `${projectName} - ${title}`, body)
 }
 
-export function formatIdleDraft(sessionID: string, projectName: string): NotificationDraft {
-  const message = `Session ${sessionID} has finished its run and is idle.\nIt is waiting for your next instruction.`
+export function formatIdleDraft(
+  sessionID: string,
+  projectName: string,
+  details: { title?: string | null; lastMessage?: string | null } = {},
+): NotificationDraft {
+  // Prefer a human session title over the opaque session ID.
+  const subject = details.title && details.title.trim() !== "" ? details.title : sessionID
+  let message = `Session "${subject}" has finished its run and is idle.\nIt is waiting for your next instruction.`
+  const lastMessage = details.lastMessage?.trim()
+  if (lastMessage && lastMessage !== "") {
+    message = `Session "${subject}" finished. Last output:\n${lastMessage}`
+  }
   return draft("session.idle", `${projectName} - session idle`, message)
 }
 

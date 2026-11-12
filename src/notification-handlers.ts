@@ -43,6 +43,10 @@ export interface SessionLookupResult {
   parentID?: string | null
   /** The session's location directory; undefined when the lookup cannot tell. */
   directory?: string | null
+  /** The native `session.get` response nests the directory under `location`. */
+  location?: { directory?: string | null } | null
+  /** The session's display title; undefined when the lookup cannot tell. */
+  title?: string | null
 }
 
 export interface HandlerDeps {
@@ -53,6 +57,12 @@ export interface HandlerDeps {
   directory?: string
   /** Resolves one session directly; rejects on transport failure. */
   getSession: (sessionID: string) => Promise<SessionLookupResult>
+  /**
+   * Returns the last assistant output of a session (used to make idle
+   * notifications meaningful). Optional; when absent or failing, idle
+   * notifications fall back to the generic message.
+   */
+  getLastMessage?: (sessionID: string) => Promise<string | null | undefined>
   ntfy: NtfyClient
   registry?: SessionRegistry
   log?: Logger
@@ -313,10 +323,14 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
       // parent ID and directory are read straight off the response.
       const rawParent = usable.parentID
       const parent = typeof rawParent === "string" && rawParent !== "" ? rawParent : null
-      const rawDirectory = usable.directory
+      // The native session info carries the directory under `location.directory`;
+      // tolerate the flat `directory` shape as well for injected test results.
+      const rawDirectory = usable.directory ?? usable.location?.directory
       const sessionDirectory =
         typeof rawDirectory === "string" && rawDirectory !== "" ? rawDirectory : null
-      registry.record(sessionID, parent, sessionDirectory)
+      const rawTitle = usable.title
+      const sessionTitle = typeof rawTitle === "string" && rawTitle !== "" ? rawTitle : null
+      registry.record(sessionID, parent, sessionDirectory, sessionTitle)
       return parent !== null
     } finally {
       registry.endLookup(sessionID)
@@ -362,6 +376,23 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
     if (known !== undefined) return deps.directory === undefined || known === deps.directory
     // Directory unknown (lookup failed or suppression disabled): fail open.
     return true
+  }
+
+  /**
+   * Best-effort fetch of the last assistant output for a session. A timeout or
+   * transport failure returns undefined so the idle notification can fall back
+   * to the generic message; it must never block the notification itself.
+   */
+  const lastMessageFor = async (sessionID: string): Promise<string | null | undefined> => {
+    if (!deps.getLastMessage) return undefined
+    try {
+      return await Promise.race([
+        deps.getLastMessage(sessionID),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), lookupTimeoutMs)),
+      ])
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -413,7 +444,13 @@ export function createPluginHandlers(deps: HandlerDeps): PluginHandlers {
           if (child) return
           if (disposed) return
           if (shouldDedupeIdle(parsed.sessionID, parsed.source)) return
-          await send(formatIdleDraft(parsed.sessionID, projectName))
+          // Enrich the notification with the session title and the last
+          // assistant output so it says what was actually done. Best-effort:
+          // any failure falls back to the generic message.
+          const title = registry.titleOf(parsed.sessionID)
+          const lastMessage = deps.getLastMessage ? await lastMessageFor(parsed.sessionID) : undefined
+          if (disposed) return
+          await send(formatIdleDraft(parsed.sessionID, projectName, { title, lastMessage }))
           return
         }
         case "session.error": {

@@ -31,6 +31,7 @@ function harness(
     get?: (sessionID: string) => Promise<SessionLookupResult>
     log?: Logger
     directory?: string
+    getLastMessage?: (sessionID: string) => Promise<string | null | undefined>
   } = {},
 ) {
   const sent: NtfyMessage[] = []
@@ -51,6 +52,7 @@ function harness(
     projectName: "demo-project",
     directory: overrides.directory,
     getSession: getMock,
+    getLastMessage: overrides.getLastMessage,
     ntfy,
     registry,
     log: logger,
@@ -147,6 +149,29 @@ describe("idle and error routing", () => {
     expect(h.sent[0]?.tags).toEqual(["hourglass_done"])
     expect(h.sent[0]?.title).toContain("demo-project")
     expect(h.getMock).not.toHaveBeenCalled()
+  })
+
+  it("enriches the idle notification with the session title and last output", async () => {
+    const h = harness({
+      getLastMessage: async () => "Fixed the redirect loop.",
+    })
+    h.registry.record("sess_title", null, null, "Fix login bug")
+    await h.handlers.event(executionSucceeded("sess_title"))
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]?.message).toContain("Fix login bug")
+    expect(h.sent[0]?.message).toContain("Fixed the redirect loop.")
+  })
+
+  it("falls back to the generic idle message when last output cannot be fetched", async () => {
+    const h = harness({
+      getLastMessage: async () => {
+        throw new Error("boom")
+      },
+    })
+    h.registry.record("sess_failmsg", null)
+    await h.handlers.event(executionSucceeded("sess_failmsg"))
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]?.message).toContain("has finished its run")
   })
 
   it("suppresses session.execution.succeeded for a known child session", async () => {
@@ -392,19 +417,28 @@ describe("failure containment", () => {
 
 describe("ownership of location-less execution events", () => {
   it("notifies when the session belongs to the plugin directory", async () => {
-    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/home/tester/proj" }) })
+    const h = harness({
+      directory: "/home/tester/proj",
+      get: async () => ({ location: { directory: "/home/tester/proj" } }),
+    })
     await h.handlers.event(executionSucceeded("sess_mine"))
     expect(h.sent).toHaveLength(1)
   })
 
   it("skips a session that belongs to another directory", async () => {
-    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/other/proj" }) })
+    const h = harness({
+      directory: "/home/tester/proj",
+      get: async () => ({ location: { directory: "/other/proj" } }),
+    })
     await h.handlers.event(executionSucceeded("sess_foreign"))
     expect(h.sent).toHaveLength(0)
   })
 
   it("skips a session whose directory is cached from a previous lookup", async () => {
-    const h = harness({ directory: "/home/tester/proj", get: async () => ({ directory: "/other/proj" }) })
+    const h = harness({
+      directory: "/home/tester/proj",
+      get: async () => ({ location: { directory: "/other/proj" } }),
+    })
     await h.handlers.event(executionSucceeded("sess_cached_foreign"))
     expect(h.sent).toHaveLength(0)
     // Second event hits the registry cache, no further lookup needed.

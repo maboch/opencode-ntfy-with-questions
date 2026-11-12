@@ -33,6 +33,7 @@ interface LookupState {
 export class SessionRegistry {
   private readonly parents = new Map<string, string | null>()
   private readonly directories = new Map<string, string>()
+  private readonly titles = new Map<string, string>()
   private readonly lookups = new Map<string, LookupState>()
 
   /**
@@ -40,13 +41,17 @@ export class SessionRegistry {
    * A missing or empty parentID means the session has no parent (root).
    * Invalidates any in-flight lookup for the session.
    */
-  record(sessionID: string, parentID: string | null | undefined, directory?: string | null): void {
+  record(sessionID: string, parentID: string | null | undefined, directory?: string | null, title?: string | null): void {
     if (sessionID === "") return
     this.invalidateLookup(sessionID)
     this.parents.set(sessionID, parentID && parentID !== "" ? parentID : null)
     if (directory !== undefined) {
       if (directory === null || directory === "") this.directories.delete(sessionID)
       else this.directories.set(sessionID, directory)
+    }
+    if (title !== undefined) {
+      if (title === null || title === "") this.titles.delete(sessionID)
+      else this.titles.set(sessionID, title)
     }
   }
 
@@ -55,6 +60,7 @@ export class SessionRegistry {
     this.invalidateLookup(sessionID)
     this.parents.delete(sessionID)
     this.directories.delete(sessionID)
+    this.titles.delete(sessionID)
   }
 
   /**
@@ -75,6 +81,11 @@ export class SessionRegistry {
     return this.directories.get(sessionID)
   }
 
+  /** Returns the cached session title, or undefined when not known. */
+  titleOf(sessionID: string): string | undefined {
+    return this.titles.get(sessionID)
+  }
+
   /** Number of cached sessions. */
   get size(): number {
     return this.parents.size
@@ -84,6 +95,7 @@ export class SessionRegistry {
   clear(): void {
     this.parents.clear()
     this.directories.clear()
+    this.titles.clear()
     for (const sessionID of this.lookups.keys()) this.invalidateLookup(sessionID)
   }
 
